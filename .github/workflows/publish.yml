@@ -1,0 +1,137 @@
+name: Build & Publish Update
+
+# كل push على main → يبني APK + نسخة ويب، ينشرها على GitHub Pages،
+# ويحدّث ملف update.json فيكتشف التطبيق التحديث تلقائياً.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "remote/**"   # تعديل الإعدادات عن بعد لا يحتاج بناء
+      - "**.md"
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "ملاحظات الإصدار (تظهر للمستخدم)"
+        required: false
+        default: ""
+      force:
+        description: "تحديث إجباري؟"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version
+        id: ver
+        run: |
+          BASE=$(grep '^version:' pubspec.yaml | sed -E 's/version: *([0-9]+\.[0-9]+)\..*/\1/')
+          BUILD=$(( ${{ github.run_number }} + 1 ))
+          echo "name=${BASE}.${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "build=${BUILD}" >> "$GITHUB_OUTPUT"
+          echo "Version: ${BASE}.${BUILD} (+${BUILD})"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter test
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is missing — updates would fail to install."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          cat > android/key.properties <<EOF
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=$RUNNER_TEMP/release.jks
+          EOF
+
+      - name: Build APK
+        run: flutter build apk --release --build-name=${{ steps.ver.outputs.name }} --build-number=${{ steps.ver.outputs.build }}
+
+      - name: Build Web
+        run: |
+          flutter build web --release \
+            --base-href "/${{ github.event.repository.name }}/" \
+            --build-name=${{ steps.ver.outputs.name }} --build-number=${{ steps.ver.outputs.build }}
+          # كسر كاش المتصفح لكي تصل النسخة الجديدة فوراً
+          B=${{ steps.ver.outputs.build }}
+          sed -i "s|\"mainJsPath\":\"main.dart.js\"|\"mainJsPath\":\"main.dart.js?v=$B\"|g" build/web/flutter_bootstrap.js
+          sed -i "s|src=\"flutter_bootstrap.js\"|src=\"flutter_bootstrap.js?v=$B\"|" build/web/index.html
+
+      - name: Assemble site + update manifest
+        env:
+          INPUT_NOTES: ${{ github.event.inputs.notes }}
+          INPUT_FORCE: ${{ github.event.inputs.force }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          mkdir -p site
+          cp -r build/web/* site/
+          cp build/app/outputs/flutter-apk/app-release.apk site/app.apk
+          SHA=$(sha256sum site/app.apk | cut -d' ' -f1)
+          NOTES="${INPUT_NOTES:-$COMMIT_MSG}"
+          FORCE="${INPUT_FORCE:-false}"
+          export NOTES FORCE
+          python3 - <<PY
+          import json, os
+          json.dump({
+            "version": "${{ steps.ver.outputs.name }}",
+            "build": ${{ steps.ver.outputs.build }},
+            "apk_url": os.environ["PAGES_URL"] + "/app.apk?v=${{ steps.ver.outputs.build }}",
+            "sha256": "$SHA",
+            "notes": os.environ.get("NOTES", "").strip(),
+            "force": os.environ.get("FORCE", "false") == "true",
+            "min_supported_build": 0
+          }, open("site/update.json", "w"), ensure_ascii=False, indent=2)
+          PY
+          cat site/update.json
+          touch site/.nojekyll
+        shell: bash
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.name }}
+          name: v${{ steps.ver.outputs.name }}
+          body: ${{ github.event.inputs.notes || github.event.head_commit.message }}
+          files: build/app/outputs/flutter-apk/app-release.apk

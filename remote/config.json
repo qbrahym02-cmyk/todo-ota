@@ -1,0 +1,23 @@
+{
+  "config_version": 1,
+  "app_title": "مهامي",
+  "primary_color": "#4F46E5",
+  "announcement": {
+    "enabled": true,
+    "text": "👋 أهلاً! هذه الرسالة تأتي من الإنترنت — عدّل ملف remote/config.json على GitHub وستتغير هنا بدون أي تحديث.",
+    "color": "#0EA5E9",
+    "url": null
+  },
+  "features": {
+    "priorities": true,
+    "due_dates": true,
+    "categories": true,
+    "stats": true
+  },
+  "categories": ["عام", "عمل", "شخصي", "تسوق"],
+  "empty_state_text": "لا توجد مهام بعد — اضغط + لإضافة أول مهمة",
+  "maintenance": {
+    "enabled": false,
+    "message": "التطبيق تحت الصيانة، نعود قريباً"
+  }
+}
